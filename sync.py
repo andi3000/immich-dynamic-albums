@@ -1,7 +1,7 @@
 from argparse import ArgumentParser, ArgumentTypeError
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import itertools
 import json
@@ -19,7 +19,12 @@ from semver.version import Version
 class Immich:
     def __init__(self, immich_url: str, api_key: str) -> None:
         self.immich_url = immich_url.rstrip("/")
-        self.api_key = api_key
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-api-key": api_key,
+        })
 
     def whoami(self):
         return self._get("/api/users/me")
@@ -27,17 +32,25 @@ class Immich:
     def version(self):
         return self._get("/api/server/version")
 
-    def get_people(self):
-        return self._get("/api/people?size=1000&withHidden=false")
+    def get_people(self) -> Iterable[Dict]:
+        """Fetch all (non-hidden) people, transparently paginating."""
+        page = 1
+        while True:
+            result = self._get("/api/people", params={"size": 1000, "withHidden": False, "page": page})
+
+            for person in result.get("people", []):
+                yield person
+
+            if not result.get("hasNextPage"):
+                break
+
+            page += 1
 
     def get_tags(self):
         return self._get("/api/tags")
 
     def get_albums(self):
         return self._get("/api/albums")
-
-    def get_album(self, album_id: str, with_assets: bool = False):
-        return self._get(f"/api/albums/{album_id}?withoutAssets={json.dumps(not with_assets)}")
 
     def create_album(self, name: str, description: str = None):
         # me = self.whoami()
@@ -65,114 +78,70 @@ class Immich:
 
         return self._put(f"/api/albums/{album_id}/assets", add_params)
 
-    def search_assets(self, **search_params) -> Iterable:
-        page = None
+    def search_metadata_assets(self, search_filter: Dict) -> Iterable[Dict]:
+        """Search for assets matching a structured filter, transparently paginating via cursor."""
+        cursor = None
         while True:
-            search_result = self.search(page=page, **search_params)
-            assets_result = search_result["assets"]
+            search_params = {
+                "filter": search_filter,
+                "size": 1000,
+                "withExif": True,
+                "withPeople": True,
+            }
 
-            for item in assets_result["items"]:
+            if cursor:
+                search_params["cursor"] = cursor
+
+            search_result = self._post("/api/search/metadata", search_params)
+            assets_result = search_result.get("assets", {})
+
+            for item in assets_result.get("items", []):
                 yield item
 
-            next_page = assets_result["nextPage"]
-            if not next_page:
+            cursor = assets_result.get("nextCursor")
+            if not cursor:
                 break
 
-            page = int(next_page)
+    def search_smart_assets(self, search_filter: Dict, query: str, size: int = 1000) -> List[Dict]:
+        """Perform a natural-language smart search, scoped by a structured filter.
 
-    def search_assets_by_album(self, album_id: str) -> Iterable:
-        """Search for all assets in a specific album with pagination support."""
-        page = None
-        while True:
-            search_result = self.search_by_album(album_id, page=page)
-            assets_result = search_result["assets"]
-
-            for item in assets_result["items"]:
-                yield item
-
-            next_page = assets_result["nextPage"]
-            if not next_page:
-                break
-
-            page = int(next_page)
-
-    def search_by_album(self, album_id: str, page: int = None):
-        """Search metadata for assets in a specific album."""
+        Smart search has no cursor-based pagination in Immich 3.2, so results are capped at
+        `size` (at most 1000).
+        """
         search_params = {
-            "albumId": album_id,
-            "isVisible": True,
+            "filter": search_filter,
+            "query": query,
+            "size": size,
             "withExif": True,
-            "withPeople": True,
         }
 
-        if page:
-            search_params["page"] = page
+        search_result = self._post("/api/search/smart", search_params)
+        items = search_result.get("assets", {}).get("items", [])
 
-        return self._post("/api/search/metadata", search_params)
+        if len(items) >= size:
+            print(
+                f"Warning: smart_query {query!r} returned {len(items)} results, at or above the "
+                f"limit of {size}. Results may be truncated since smart search cannot be paginated."
+            )
 
-    def search(
-        self,
-        country: str = None,
-        state: str = None,
-        city: str = None,
-        path: str = None,
-        before: datetime = None,
-        after: datetime = None,
-        favorite: bool = None,
-        person_ids: List[str] = None,
-        tag_ids: List[str] = None,
-        page: int = None
-    ):
-        search_params = {
-            "isVisible": True,
-            "withExif": True,
-            "withPeople": True,
-        }
+        return items
 
-        if country:
-            search_params["country"] = country
-        if state:
-            search_params["state"] = state
-        if city:
-            search_params["city"] = city
-        if path:
-            search_params["originalPath"] = path
-        if before:
-            search_params["takenBefore"] = before.isoformat() # 2025-01-31T23:59:59.999Z
-        if after:
-            search_params["takenAfter"] = after.isoformat() # 2025-01-31T23:59:59.999Z
-        if favorite is not None:
-            search_params["isFavorite"] = favorite
-        if person_ids:
-            search_params["personIds"] = person_ids
-        if tag_ids:
-            search_params["tagIds"] = tag_ids
-        if page:
-            search_params["page"] = page
+    def _get(self, path, params: Optional[Dict] = None):
+        return self._api("GET", path, params=params)
 
-        return self._post("/api/search/metadata", search_params)
+    def _put(self, path, json_body: Dict):
+        return self._api("PUT", path, json_body=json_body)
 
-    def _get(self, path, payload = {}):
-        return self._api("GET", path, payload)
+    def _post(self, path, json_body: Dict):
+        return self._api("POST", path, json_body=json_body)
 
-    def _put(self, path, payload):
-        return self._api("PUT", path, json.dumps(payload))
+    def _delete(self, path, json_body: Dict):
+        return self._api("DELETE", path, json_body=json_body)
 
-    def _post(self, path, payload):
-        return self._api("POST", path, json.dumps(payload))
-
-    def _delete(self, path, payload):
-        return self._api("DELETE", path, json.dumps(payload))
-
-    def _api(self, verb: str, path: str, payload: Any):
+    def _api(self, verb: str, path: str, json_body: Optional[Dict] = None, params: Optional[Dict] = None):
         url = f"{self.immich_url}/{path.lstrip('/')}"
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "x-api-key": self.api_key,
-        }
 
-        response = requests.request(verb, url, headers=headers, data=payload, timeout=60)
+        response = self.session.request(verb, url, json=json_body, params=params, timeout=60)
         if response.status_code >= 400:
             print(url)
             print(response.text)
@@ -197,6 +166,68 @@ def create_album_if_not_exists(immich: Immich, album_name: str) -> str:
 def read_json(config_path: Union[Path, str]) -> Any:
     with open(config_path) as f:
         return json.load(f)
+
+
+def build_search_filter(
+    country: str = None,
+    state: str = None,
+    city: str = None,
+    path: str = None,
+    before: datetime = None,
+    after: datetime = None,
+    favorite: bool = None,
+    person_ids: List[str] = None,
+    tag_ids: List[str] = None,
+    album_ids: List[str] = None,
+) -> Dict:
+    """Build an Immich `SearchFilter` object out of the tool's internal query representation.
+
+    Only non-deprecated `SearchFilter` fields are used, per Immich >= 3.2. Assets are always
+    scoped to the visible timeline (i.e. not archived/hidden), matching this tool's original intent.
+    """
+    search_filter: Dict[str, Any] = {"visibility": {"eq": "timeline"}}
+
+    if country:
+        search_filter["country"] = {"eq": country}
+    if state:
+        search_filter["state"] = {"eq": state}
+    if city:
+        search_filter["city"] = {"eq": city}
+    if path:
+        search_filter["originalPath"] = {"like": f"%{path}%"}
+
+    taken_at = {}
+    if after:
+        taken_at["gte"] = after.isoformat()  # 2025-01-31T00:00:00
+    if before:
+        taken_at["lt"] = before.isoformat()  # 2025-01-31T23:59:59.999
+    if taken_at:
+        search_filter["takenAt"] = taken_at
+
+    if favorite is not None:
+        search_filter["isFavorite"] = {"eq": favorite}
+    if person_ids:
+        search_filter["personIds"] = {"all": person_ids}
+    if tag_ids:
+        search_filter["tagIds"] = {"all": tag_ids}
+    if album_ids:
+        search_filter["albumIds"] = {"all": album_ids}
+
+    return search_filter
+
+
+def run_search_query(immich: Immich, subquery: Dict) -> Iterable[Dict]:
+    """Execute a single fanned-out subquery, routing to smart search when requested."""
+    subquery = dict(subquery)
+    smart_query = subquery.pop("smart_query", None)
+    smart_query_limit = subquery.pop("smart_query_limit", None) or 1000
+
+    search_filter = build_search_filter(**subquery)
+
+    if smart_query:
+        return immich.search_smart_assets(search_filter, smart_query, size=smart_query_limit)
+
+    return list(immich.search_metadata_assets(search_filter))
 
 
 def normalize_query_people(query: Dict, people_mapping: Dict[str, str]):
@@ -275,6 +306,9 @@ def normalize_query_any_people(query: Dict, people_mapping: Dict[str, str]):
 
 
 def config_query_to_search_queries(query: Dict) -> Iterable[Dict]:
+    # work on a copy so we never mutate the caller's config dict
+    query = dict(query)
+
     # use 'None' as default to simplify the product operation below
     query_countries = query.pop("country", [None])
     if isinstance(query_countries, str):
@@ -312,7 +346,7 @@ def config_query_to_search_queries(query: Dict) -> Iterable[Dict]:
         }
 
         if p[2] is not None:
-             subquery["person_ids"] = [p[2]]
+            subquery["person_ids"] = [p[2]]
 
         yield subquery
 
@@ -345,15 +379,15 @@ def sync_albums(args):
     immich = Immich(args.immich_url, args.immich_api_key)
 
     # print version
-    immich_version = Version(**immich.version())
+    version_info = immich.version()
+    immich_version = Version(version_info["major"], version_info["minor"], version_info["patch"])
     print(f"Immich version: {immich_version}")
 
-    min_supported_version = Version(1, 127, 0)
+    min_supported_version = Version(3, 2, 0)
     assert immich_version >= min_supported_version, f"Minimum supported version is {min_supported_version}"
 
     # prefetch all people to allow matching by name
-    people = immich.get_people()
-    people_name_to_id = dict((p["name"], p["id"]) for p in people["people"])
+    people_name_to_id = dict((p["name"], p["id"]) for p in immich.get_people())
 
     # prefetch all tags to allow matching by name
     tags = immich.get_tags()
@@ -371,16 +405,25 @@ def sync_albums(args):
         people_strict_mode = query.pop("people_strict_mode", False)
         person_ids = query.get("person_ids", None)
 
+        if query.get("smart_query") and people_strict_mode:
+            raise ValueError(
+                "Cannot use 'smart_query' together with 'people_strict_mode': "
+                "smart search does not return face data."
+            )
+
         # split the query into multiple subqueries depending on whether there are multiple
         # countries or timespans
-        search_queries = list(config_query_to_search_queries(config["query"]))
+        search_queries = list(config_query_to_search_queries(query))
         print(f"Album search queries: {search_queries}")
 
-        search_results = [list(immich.search_assets(**query)) for query in search_queries]
+        search_results = [run_search_query(immich, subquery) for subquery in search_queries]
         search_results = list(itertools.chain(*search_results))
 
         if people_strict_mode and person_ids:
-            search_results = [result for result in search_results if len(result["people"]) == len(person_ids)]
+            search_results = [
+                result for result in search_results
+                if len(result.get("people") or []) == len(person_ids)
+            ]
 
         # aggregate the asset ids from all search queries
         search_assets_ids = [asset["id"] for asset in search_results]
@@ -389,7 +432,8 @@ def sync_albums(args):
         album_without_assets = create_album_if_not_exists(immich, album_name)
 
         # fetch the album's current assets using the search API
-        album_asset_results = list(immich.search_assets_by_album(album_without_assets["id"]))
+        album_filter = build_search_filter(album_ids=[album_without_assets["id"]])
+        album_asset_results = list(immich.search_metadata_assets(album_filter))
         album_assets_ids = [asset["id"] for asset in album_asset_results]
 
         # calculate assets missing from the album and assets which should be removed from it

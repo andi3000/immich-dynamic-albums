@@ -5,7 +5,9 @@ Dynamic albums are albums where the assets are based on some query or a rule, fo
 Manually maintaining such albums is very tedious, hence the need for some automated way of doing it.
 This has been requested in https://github.com/immich-app/immich/discussions/1673, but as of January 2024 it is not natively supported in Immich.
 
-The current version should work with any fairly recent Immich version, but it has only been tested with v1.125.6.
+This version relies on the structured `filter` search API introduced in Immich v3.2.0, so **Immich v3.2.0 or later is required**.
+
+Only assets on the visible timeline are matched (archived and hidden assets are excluded), matching how Immich's own search behaves by default.
 
 ## Configuration
 
@@ -90,6 +92,29 @@ Besides few standard configuration options (such as Immich URL and API key), the
         "name": "Me or Wife",
         "query": {
             "any_people": ["Me", "Wife"]
+        }
+    },
+    {
+        # Search by state and/or city (names should match the ones in Immich)
+        "name": "Best of California",
+        "query": {
+            "state": "California",
+            "city": "San Francisco"
+        }
+    },
+    {
+        # Natural language search using Immich's smart (CLIP) search, optionally combined
+        # with other filters such as 'timespan'. Smart search has no pagination, so results
+        # are capped by 'smart_query_limit' (defaults to 1000, Immich's own maximum) and a
+        # warning is printed if that limit is hit. Cannot be combined with 'people_strict_mode'.
+        "name": "Beach days",
+        "query": {
+            "smart_query": "beach, ocean, sunset",
+            "smart_query_limit": 200,
+            "timespan": {
+                "start": "2023-06-01",
+                "end": "2023-09-01"
+            }
         }
     }
 ]
