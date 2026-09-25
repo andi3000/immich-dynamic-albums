@@ -36,7 +36,9 @@ class Immich:
         """Fetch all (non-hidden) people, transparently paginating."""
         page = 1
         while True:
-            result = self._get("/api/people", params={"size": 1000, "withHidden": False, "page": page})
+            # requests serializes Python bools as "True"/"False" in query strings, but Immich's
+            # query-param validation requires the lowercase literals "true"/"false"
+            result = self._get("/api/people", params={"size": 1000, "withHidden": "false", "page": page})
 
             for person in result.get("people", []):
                 yield person
