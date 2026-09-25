@@ -80,6 +80,36 @@ class Immich:
 
             page = int(next_page)
 
+    def search_assets_by_album(self, album_id: str) -> Iterable:
+        """Search for all assets in a specific album with pagination support."""
+        page = None
+        while True:
+            search_result = self.search_by_album(album_id, page=page)
+            assets_result = search_result["assets"]
+
+            for item in assets_result["items"]:
+                yield item
+
+            next_page = assets_result["nextPage"]
+            if not next_page:
+                break
+
+            page = int(next_page)
+
+    def search_by_album(self, album_id: str, page: int = None):
+        """Search metadata for assets in a specific album."""
+        search_params = {
+            "albumId": album_id,
+            "isVisible": True,
+            "withExif": True,
+            "withPeople": True,
+        }
+
+        if page:
+            search_params["page"] = page
+
+        return self._post("/api/search/metadata", search_params)
+
     def search(
         self,
         country: str = None,
@@ -358,9 +388,9 @@ def sync_albums(args):
         # create the target album or find it amongst the other albums
         album_without_assets = create_album_if_not_exists(immich, album_name)
 
-        # (again) retrieve the album, including it's assets
-        album = immich.get_album(album_without_assets["id"], with_assets=True)
-        album_assets_ids = [asset["id"] for asset in album["assets"]]
+        # fetch the album's current assets using the search API
+        album_asset_results = list(immich.search_assets_by_album(album_without_assets["id"]))
+        album_assets_ids = [asset["id"] for asset in album_asset_results]
 
         # calculate assets missing from the album and assets which should be removed from it
         album_missing_assets_ids = list(set(search_assets_ids) - set(album_assets_ids))
@@ -370,10 +400,10 @@ def sync_albums(args):
         print(f"Extra assets: {len(album_extra_assets_ids)}")
 
         if album_extra_assets_ids:
-            immich.delete_assets_from_album(album["id"], album_extra_assets_ids)
+            immich.delete_assets_from_album(album_without_assets["id"], album_extra_assets_ids)
 
         if album_missing_assets_ids:
-            immich.add_assets_to_album(album["id"], album_missing_assets_ids)
+            immich.add_assets_to_album(album_without_assets["id"], album_missing_assets_ids)
 
         print("Done")
 
