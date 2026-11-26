@@ -1,5 +1,5 @@
 from argparse import ArgumentParser, ArgumentTypeError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -170,6 +170,18 @@ def read_json(config_path: Union[Path, str]) -> Any:
         return json.load(f)
 
 
+def format_immich_datetime(dt: datetime) -> str:
+    """Serialize a datetime for Immich search filters.
+
+    Immich requires an explicit timezone suffix on takenAt bounds (e.g.
+    "2025-12-01T00:00:00.000Z") and rejects naive timestamps with a 400.
+    Naive datetimes are interpreted as server-local time and converted to UTC,
+    matching the date-only semantics of config timespans.
+    """
+    utc_dt = dt.astimezone(timezone.utc)
+    return utc_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def build_search_filter(
     country: str = None,
     state: str = None,
@@ -200,9 +212,12 @@ def build_search_filter(
 
     taken_at = {}
     if after:
-        taken_at["gte"] = after.isoformat()  # 2025-01-31T00:00:00
+        # inclusive lower bound: local midnight at the start of the start date, in UTC
+        taken_at["gte"] = format_immich_datetime(after)
     if before:
-        taken_at["lt"] = before.isoformat()  # 2025-01-31T23:59:59.999
+        # exclusive upper bound: local midnight after the end date, in UTC,
+        # so the whole end day is included
+        taken_at["lt"] = format_immich_datetime(before)
     if taken_at:
         search_filter["takenAt"] = taken_at
 
@@ -324,6 +339,8 @@ def config_query_to_search_queries(query: Dict) -> Iterable[Dict]:
     elif not isinstance(query_timespans, list):
         raise ValueError("'timespan' has to be either a dict or a list of dicts")
 
+    # Config timespans are date-only and interpreted in the server's local timezone;
+    # the upper bound is end + 24h, used as an exclusive 'lt' so the whole end day counts.
     query_timespans = [
         {
             "before": datetime.strptime(q["end"], "%Y-%m-%d") + timedelta(hours=24),

@@ -122,6 +122,11 @@ Besides few standard configuration options (such as Immich URL and API key), the
 
 Beware that if you specify the name of an existing album, it will be overwritten. If you remove some of the albums from the config, they will not be deleted in immich - you will have to do it manually.
 
+Timespan bounds are date-only (`YYYY-MM-DD`) and are interpreted in the container's local
+timezone. The end date is inclusive, so `{"start": "2025-12-01", "end": "2026-12-10"}` covers the
+whole of 2026-12-10. Set the `TZ` environment variable (e.g. `TZ=Europe/Berlin`) to match your
+local timezone; without it the container uses UTC.
+
 
 ## Usage
 
